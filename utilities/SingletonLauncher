@@ -1,0 +1,801 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*
+
+# Distributed under GPLv2
+# 2010, Lemote.com
+
+import sys, os.path, os, fcntl, getopt, datetime, time, logging, traceback
+import subprocess, select, signal, errno
+
+class SingletonLauncherCfg(object):
+	logDir = '/var/log/SingletonLauncher'
+	lockDir = '/tmp'
+
+class i18nDict(object):
+	def __init__(self, lang = ''):
+		self.setLang(lang)
+
+	def setLang(self, lang = ''):
+		self.__cur_locale = getattr(self, lang, {})
+	
+	def __getitem__(self, y):
+		return self.__cur_locale.get(y, y)
+
+	zh_CN = {
+		'debug' : '调试',
+		'info' : '信息',
+		'warning' : '警告',
+		'error' : '错误',
+		"Internal error: Failed to create lock('%s')" : "内部错误： 不能创建锁('%s')",
+		'"%s" is already running' : '"%s"已在运行',
+		'Failed to launch "%s"' : '启动"%s"失败',
+		'"%s" exited unexpectedly (signal %d)' : '"%s" 异常退出 (信号%d)',
+		'"%s" exited unexpectedly (exit code %d)' : '"%s" 异常退出 (退出代码%d)',
+		'Export log' : '导出日志',
+		"Exporting ...\nFrom: '%s'\nTo: '%s'" : "正在导出 ...\n从: '%s'\n到: '%s'",
+		'Retry' : '重试',
+		'Failed to export log (please check permission, etc)' : '导出日志失败 (请检查权限等)',
+	}
+
+i18nData = i18nDict()
+
+
+class SLock(object):
+	def __init__(self, lock_path):
+		self.__locked = False
+		self.__lock_path = lock_path 
+		self.__fd = os.open(self.__lock_path, os.O_CREAT | os.O_RDWR)
+
+	def __del__(self):
+		os.close(self.__fd)
+
+	def lock(self):
+		assert self.__locked == False, 're-enter the lock'
+		flags = fcntl.LOCK_EX | fcntl.LOCK_NB
+
+		fcntl.lockf(self.__fd, flags)
+		self.__locked = True
+
+	def unlock(self):
+		assert self.__locked == True, 'unlock an unlocked lock'
+		fcntl.lockf(self.__fd, fcntl.LOCK_UN)
+		self.__locked = False
+
+
+def prepare_GUI_widgets():
+	import threading
+	import gobject
+	import gtk
+	import pynotify
+
+	levels_to_stocks = {
+		'debug' : gtk.STOCK_DIALOG_INFO,
+		'info' : gtk.STOCK_DIALOG_INFO,
+		'warning' : gtk.STOCK_DIALOG_WARNING,
+		'error' : gtk.STOCK_DIALOG_ERROR,
+	}
+
+	# Initializing
+	if not pynotify.is_initted():
+		pynotify.init(name)
+		gtk.gdk.threads_init()
+
+		# seems useless
+		# gtk.init_check()
+
+
+	class copyProgressBar(gtk.Dialog):
+		RESPONSE_RETRY = 2
+	
+		def __init__(self, from_, to_, parent = None):
+			title = i18nData['Export log']
+			gtk.Dialog.__init__(self, title = title, parent = parent,
+					flags = gtk.DIALOG_MODAL | gtk.DIALOG_DESTROY_WITH_PARENT)
+
+			self.set_default_size(350, -1)
+
+			but_retry = gtk.Button(i18nData['Retry'])
+
+			but_cancel = gtk.Button(stock = gtk.STOCK_CANCEL)
+			but_cancel.show()
+
+			self.add_action_widget(but_retry, self.RESPONSE_RETRY)
+			self.add_action_widget(but_cancel, gtk.RESPONSE_CANCEL)
+
+			label1 = gtk.Label()
+			label1.set_text(i18nData["Exporting ...\nFrom: '%s'\nTo: '%s'"] % (from_, to_))
+			label1.show()
+			# label1.set_line_wrap(True)
+
+			label2 = gtk.Label()
+			label2.set_use_markup(True)
+			label2.set_line_wrap(True)
+
+			align = gtk.Alignment(0.5, 0.5, 1.0, 0.0)
+			progress_bar = gtk.ProgressBar()
+			progress_bar.show()
+			align.add(progress_bar)
+			align.show()
+
+			self.vbox.pack_start(label1, True, True, padding = 5) 
+			self.vbox.pack_start(label2, True, True, padding = 5) 
+			self.vbox.pack_start(align, True, True, padding = 5)
+
+			self.__state_label = label2
+			self.__progress_bar = progress_bar
+			self.__retry_button = but_retry
+			self.__copy_src = from_
+			self.__copy_dst = to_
+
+			self.__worker = None
+			self.__timeout = None
+	
+		def __do_copy(self, from_, to_):
+			copy_blk = 512 * 1024 # 512K
+			try:
+				src = open(from_, 'rb')
+				dst = open(to_ + '.tmp', 'wb')
+
+				finfo = os.fstat(src.fileno())
+				size = finfo.st_size
+
+				blk = src.read(copy_blk)
+				progress = 0
+
+				while blk:
+					dst.write(blk)
+					blk = src.read(copy_blk)
+					progress += len(blk)	
+					if progress > size:
+						# file size changed since fstat
+						progress_fraction = 1.0
+					else:
+						# size should not be zero, since we read a non-empty blk
+						progress_fraction = float(progress) / size
+					self.__progress_lock.acquire()
+					self.__progress = progress_fraction
+					self.__uptodate = False
+					abort = self.__abort
+					self.__progress_lock.release()	
+
+					if abort: break
+				else:
+					# Done 
+					self.__progress_lock.acquire()
+					self.__progress = 1.0
+					self.__uptodate = False
+					self.__done = True
+					abort = self.__abort
+					self.__progress_lock.release()
+
+					# flush
+					dst.close()
+					src.close()
+
+				# Copy finished or aborted
+				if not abort:	
+					# rename
+					os.rename(to_ + '.tmp', to_)
+			except: 
+				self.__progress_lock.acquire()
+				self.__copy_exception = sys.exc_info()
+				self.__uptodate = False
+				self.__progress_lock.release()
+
+				raise
+			finally:
+				try:
+					# cleanup
+					os.remove(to_ + '.tmp')
+				except OSError:
+					# Ignore If fail
+					pass
+
+	
+		def __schedule_copy(self, from_, to_):
+			self.__state_label.hide()
+			self.__retry_button.hide()
+
+			self.__progress_lock = threading.Lock()
+			self.__progress = 0
+			self.__uptodate = True
+			self.__done = False
+			self.__abort = False
+			self.__copy_exception = None
+
+			self.__timeout = gobject.timeout_add(500, self.__update_progress_bar) 
+
+			self.__worker = threading.Thread(target = self.__do_copy, name = 'copy-worker', args = (from_, to_))
+			self.__worker.start()
+
+		def __stop_copy(self):
+			if self.__worker:
+				self.__progress_lock.acquire()
+				self.__abort = True
+				self.__progress_lock.release()
+				self.__worker.join()
+				self.__worker = None
+
+			if self.__timeout:
+				# Remove source here: mainloop probably stopped
+				# Don't try to remove in GMainContext. i.e. returns False in __update_progress_bar
+				gobject.source_remove(self.__timeout)
+				self.__timeout = None
+
+		def __update_progress_bar(self):
+			needs_rearm = True
+			copy_exception = None
+			progress = None
+
+			self.__progress_lock.acquire()
+			if self.__done:
+				self.__progress_lock.release()
+
+				progress = 1.0
+				needs_rearm = False
+				self.response(gtk.RESPONSE_OK)
+			elif self.__uptodate:
+				self.__progress_lock.release()
+
+				needs_rearm = True
+			elif self.__copy_exception:
+				if not self.__uptodate:
+					self.__uptodate = True
+					progress = self.__progress
+
+				copy_exception = self.__copy_exception
+
+				self.__progress_lock.release()
+
+				needs_rearm = False
+			else:
+				# not uptodate
+				self.__uptodate = True
+				progress = self.__progress
+
+				self.__progress_lock.release()
+				needs_rearm = True
+
+			if progress:
+				self.__progress_bar.set_fraction(progress)
+				self.__progress_bar.set_text('%.1f%%' % (progress * 100))
+
+			if copy_exception:
+				t, v, tb = copy_exception
+				short = '\n'.join(traceback.format_exception_only(t, v))
+
+				self.__state_label.set_markup('<span foreground="red" weight="bold">%s</span>\n%s' % (i18nData['Failed to export log (please check permission, etc)'], short))
+
+				self.__state_label.show()
+				self.__retry_button.show()
+
+			return needs_rearm
+
+		def run(self):
+			from_ = self.__copy_src
+			to_ = self.__copy_dst
+			response_id = self.RESPONSE_RETRY
+			while response_id == self.RESPONSE_RETRY:
+				self.__schedule_copy(from_, to_)
+				response_id = gtk.Dialog.run(self)	
+				self.hide()
+				self.__stop_copy() # pair with schedule
+
+				if response_id == gtk.RESPONSE_DELETE_EVENT:
+					response_id = gtk.RESPONSE_CANCEL
+
+			return response_id
+
+		def __del__(self):
+			self.__stop_copy()
+
+
+	class saveLogDialog(gtk.FileChooserDialog):
+		def __init__(self, log_path, parent = None):
+			action = gtk.FILE_CHOOSER_ACTION_SAVE
+			title = i18nData['Export log']
+			gtk.FileChooserDialog.__init__(self,
+					title = title, parent = parent, action = action,
+					buttons = (gtk.STOCK_CANCEL, gtk.RESPONSE_CANCEL,
+						gtk.STOCK_SAVE, gtk.RESPONSE_YES))
+
+			save_path_ = os.path.expanduser('~/%s' % os.path.basename(log_path))
+			self.set_current_name(save_path_)
+
+			self.set_do_overwrite_confirmation(True)
+			self.__log_path = log_path
+
+		def run(self):
+			while True:	
+				response_id = gtk.FileChooserDialog.run(self)
+				self.hide()
+				if response_id == gtk.RESPONSE_YES:
+					from_ = self.__log_path
+					to_ = self.get_filename()
+
+					if not to_: continue
+
+					response_id = copyProgressBar(from_, to_, self).run()
+				break
+
+			return response_id
+	
+
+	class msgDialog(gtk.Window):
+		stocks = levels_to_stocks
+		def __init__(self, ctxt = {}):
+			gtk.Window.__init__(self)
+			self.connect('delete-event', lambda *w: False)
+			self.connect('destroy', gtk.main_quit)
+
+			vbox_ = gtk.VBox()
+			vbox_.set_border_width(3)
+
+			hbox_ = gtk.HBox()
+			img_ = gtk.Image()
+			img_.show()
+			hbox_.pack_start(img_, padding = 3, expand = False)
+			self.__image = img_
+
+			label_ = gtk.Label()
+			label_.show()
+			hbox_.pack_start(label_, padding = 3)
+			hbox_.show()
+			self.__label = label_
+
+			vbox_.pack_start(hbox_, padding = 5)
+
+			hbutbox_ = gtk.HButtonBox()
+			hbutbox_.set_layout(gtk.BUTTONBOX_SPREAD)
+			# hbutbox_.set_spacing(5)
+			but_ok = gtk.Button(stock = gtk.STOCK_OK)
+			but_ok.connect('clicked', self.__on_ok_clicked)
+			but_ok.show()
+			hbutbox_.pack_start(but_ok, padding = 5, fill = False)
+
+			log_path = ctxt.get('path', None)
+			if log_path:
+				save_dialog = saveLogDialog(parent = self, log_path = log_path)
+
+				save_but = gtk.Button(label = i18nData['Export log'])
+				save_but.connect('clicked', self.__on_save_log_clicked, save_dialog) 
+				hbutbox_.pack_start(save_but, padding = 5, fill = False)
+
+				self.__save_log_button = save_but
+				self.__log_path = log_path
+			else:
+				self.__log_path = None
+				self.__save_log_button = None
+
+			hbutbox_.show()
+			vbox_.pack_start(hbutbox_, padding = 3, expand = False)
+			vbox_.show()
+
+			self.add(vbox_)
+
+			# window properies
+			self.set_resizable(False)
+			self.set_default_size(200, 50)
+			self.set_type_hint(gtk.gdk.WINDOW_TYPE_HINT_DIALOG)	
+
+		def popup(self, msg, level = 'info', dump_log = False):
+			self.set_position(gtk.WIN_POS_CENTER)
+			self.set_title(i18nData[level])
+		
+			stock_id = self.stocks[level]
+			icon_pixbuf = self.render_icon(stock_id, gtk.ICON_SIZE_MENU)
+		
+			self.__image.set_from_stock(stock_id, gtk.ICON_SIZE_DIALOG)
+			self.__label.set_text(msg)
+			self.set_icon(icon_pixbuf)
+
+			if self.__save_log_button:
+				if dump_log:
+					self.__save_log_button.show()
+				else:
+					self.__save_log_button.hide()
+			self.show()
+			gtk.main()
+			# gtk.gdk.flush()
+
+		def __on_ok_clicked(self, *args):
+			self.hide()
+
+			gtk.main_quit()
+
+		def __on_save_log_clicked(self, but, save_dialog):
+			self.hide()
+
+			save_dialog.run()
+			save_dialog.hide()
+			gtk.main_quit()
+
+
+	class myNotification(pynotify.Notification):
+		stocks = levels_to_stocks
+		timeout = 3
+
+		def __init__(self, ctxt = {}):
+			self.__log_path = ctxt.get('path', None)
+
+		def popup(self, msg, level = 'info', dump_log = False):
+			note_ = pynotify.Notification(msg)
+			note_.set_timeout(self.timeout * 1000)
+
+			# icon
+			stock_id = self.stocks[level]
+			helper = gtk.Dialog()
+			icon_pixbuf = helper.render_icon(stock_id, gtk.ICON_SIZE_DIALOG)
+
+			note_.set_icon_from_pixbuf(icon_pixbuf)
+		
+			# action
+			def trigger_dump_log(n, action):
+				assert action == 'dump_log'
+				# print 'trigger'
+				# python closure
+				dump_log[0] = True
+
+			def on_note_close(n):
+				# print 'closed'
+				gtk.main_quit()
+
+			note_.connect('closed', on_note_close)
+
+			if self.__log_path and dump_log:
+				note_.set_category('log')
+				note_.add_action(
+						'dump_log', 
+						i18nData['Export log'], 
+						trigger_dump_log)
+			
+			dump_log = [False]
+
+			note_.show()
+			gtk.main()
+
+			if dump_log[0]:
+				saveLogDialog(log_path = self.__log_path).run()
+				gtk.gdk.flush()
+
+
+	return {
+		'dialog' : msgDialog,
+		'note' : myNotification,
+	}
+
+
+def prepare_dummy_widgets():
+	class dummyMsgDialog(object):
+		def __init__(self, ctxt = {}):
+			object.__init__(self)
+
+		def popup(self, msg, level = 'info', dump_log = False):
+			pass
+
+	class dummyMyNotification(object):
+		def __init__(self, ctxt = {}):
+			object.__init__(self)
+
+		def popup(self, msg, level = 'info', dump_log = False):
+			pass
+		
+	return {
+		'dialog' : dummyMsgDialog,
+		'note' : dummyMyNotification,
+	}
+
+def get_logger(ctxt):
+	name = ctxt['name']
+	log_path = ctxt.get('path', None)
+	log_level = ctxt.get('level', logging.INFO)
+
+	logger = logging.getLogger(name)
+	logger.setLevel(log_level)
+	log_fmtter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
+
+	# log stderr
+	log_handler = logging.StreamHandler()
+	log_handler.setLevel(logging.DEBUG)
+	log_handler.setFormatter(log_fmtter)
+	logger.addHandler(log_handler)
+
+	if log_path:
+		# log file handler
+		try:
+			log_handler = logging.FileHandler(log_path, mode = 'w')
+			log_handler.setLevel(log_level)
+			log_handler.setFormatter(log_fmtter)
+			logger.addHandler(log_handler)
+		except IOError:
+			logger.warning('Failed to Create Log file "%s"' % log_path)
+
+			# return value
+			ctxt['path'] = None
+	return logger
+
+
+class myLogger(object):
+	def __init__(self, name, log_path = None, Enable_GUI = True, log_level = logging.INFO):	
+		ctxt = { 
+			'name' : name,
+			'path' : log_path,
+			'level' : log_level
+		}
+
+		self.__ctxt = ctxt
+
+		self.logger = get_logger(ctxt)
+
+		if Enable_GUI:
+			widgets_classes = prepare_GUI_widgets()
+		else:
+			widgets_classes = prepare_dummy_widgets()
+
+		# Msg dialog
+		self.dialog = widgets_classes['dialog'](ctxt)
+		# pynotify
+		self.note = widgets_classes['note'](ctxt)
+
+	def get_log_path(self):
+		return self.__ctxt.get('path', None)
+
+
+def do_exec(cmd, logger):
+	log_path = logger.get_log_path()
+
+	wake_r, wake_w = os.pipe()
+
+	flags = fcntl.fcntl(wake_w, fcntl.F_GETFL)
+	fcntl.fcntl(wake_w, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+	signals_ = (signal.SIGCHLD, signal.SIGTERM, signal.SIGHUP)
+	orig_signal_handlers = []
+
+	def handle_signals(signum, data):
+		exit_signals_ = (signal.SIGTERM, signal.SIGHUP)
+		if signum == signal.SIGCHLD:
+			try:
+				os.write(wake_w, '\0')
+			except IOError, e:
+				if e.errno != errno.EAGAIN:
+					raise
+		elif signum in exit_signals_:
+			try:
+				try:
+					try:
+						# Python 2.6 support the following:
+						exc.terminate()
+						# exc.kill()
+					except AttributeError:
+						# Old Python, fallback to os.kill
+						os.kill(exc.pid, signal.SIGTERM)
+				except OSError:
+					# child is already quit
+					# but this handle_singals hasn't been disarmed 
+					pass
+			except NameError:
+				# Received before exec cmd
+				pass
+			sys.exit('Received signal %d, quit' % signum)
+
+	for s in signals_:
+		orig_signal_handlers.append(signal.signal(s, handle_signals))
+
+	fd_fo = {
+		wake_r : (os.fdopen(wake_r), '<wakeup_pipe>', logger.logger.debug)
+	}
+
+	# Execute cmd
+	if log_path:
+		exc = subprocess.Popen(cmd, stdout = subprocess.PIPE, stderr = subprocess.PIPE)
+		fd_fo.update({
+			exc.stderr.fileno() : (exc.stderr, '<stderr>', logger.logger.warning),
+			exc.stdout.fileno() : (exc.stdout, '<stdout>', logger.logger.info)
+		})
+	else:
+		exc = subprocess.Popen(cmd)
+
+	monitor_list = fd_fo.keys()
+	p = select.poll()
+
+	for m in monitor_list:
+		# Open in non block mode
+		flags = fcntl.fcntl(m, fcntl.F_GETFL)
+		fcntl.fcntl(m, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+		p.register(m, select.POLLIN | select.POLLPRI | select.POLLERR | select.POLLHUP)
+
+	read_list = []
+	while exc.returncode == None:
+		while True:
+			try:
+				changed_list = p.poll()
+			except select.error:
+				if sys.exc_info()[1][0] != errno.EINTR:
+					raise
+			else:
+				break
+
+		for x in changed_list:
+			fd, e = x
+			f, fn, lh = fd_fo[fd]
+
+			if e & (select.POLLIN | select.POLLPRI):
+				read_list.append(fd)
+
+			rm_reason = None
+			if e & select.POLLHUP: rm_reason = 'IGNORE'
+			if e & select.POLLERR: rm_reason = 'POLLERR'
+
+			if rm_reason:
+				if rm_reason != 'IGNORE':
+					logger.logger.warning('Detach fd %s: %s' % (fn, rm_reason))
+				p.unregister(fd)
+				monitor_list.remove(fd)
+
+		while read_list:
+			fd = read_list.pop()
+			f, fn, lh = fd_fo[fd]
+
+			try:
+				s = f.read()
+			except IOError, e:
+				if e.errno != errno.EAGAIN:
+					raise
+
+			if fd == wake_r:
+				if exc.poll() != None:
+					read_list.extend(i for i in monitor_list if i != wake_r and i not in read_list)
+			elif s:
+				lh(fn + ' ' + s)
+
+	for i in xrange(len(signals_)):
+		s = signals_[i]
+		h = orig_signal_handlers[i]
+		signal.signal(s, h)
+
+	return exc.returncode
+
+
+if __name__ == '__main__':
+	lang = os.getenv('LANG', '')
+	lang = lang.split('.')[0]
+	if lang: i18nData.setLang(lang)
+
+	GUI_enabled = os.getenv('DISPLAY', None)
+
+	try:
+		opts, cmd = getopt.getopt(sys.argv[1:], 'ln:hdN')
+	except getopt.GetoptError:
+		t, v, tb = sys.exc_info()
+		sys.exit(v)
+
+	usage = """Usage: SingletonLauncher [-ldN] [-n global_name] cmd arg1 arg2...
+Options:
+	-l: Enable log mode (default: disabled). The output of <cmd>'s stdout and stderr will be recorded in a log file.
+	-n <global_name>: Specify global name (default basename of <cmd>). 
+	                  If another program owns this name, SingletonLauncher will quit with "<cmd> is already running".
+	-d: Enable daemon mode. <cmd> will be restarted if crashed.
+	-N: Disable GUI notification.
+"""
+
+	try:
+		name = os.path.basename(cmd[0])
+	except IndexError:
+		sys.exit(usage)
+
+	log_mode = False
+	daemon_mode = False
+	enable_GUI = GUI_enabled
+
+	for o in opts:
+		if o[0] == '-h':
+			print usage
+			sys.exit(0)
+		elif o[0] == '-l':
+			log_mode = True
+		elif o[0] == '-n':
+			name = o[1]
+		elif o[0] == '-d':
+			daemon_mode = True
+		elif o[0] == '-N':
+			enable_GUI = False
+
+
+	if '/' in name:
+		print >>sys.stderr, 'Warning: -n <argument> contains illegal-characters !'
+		name = name.replace('/', '.')
+	
+	lock_ext = '.lock.SingletonLauncher'
+	max_fn_len = 255 - len(lock_ext)
+	if len(name) > max_fn_len:
+		print >>sys.stderr, 'Warning: -n <argument> longer than 255 bytes!'
+		name = name[:max_fn_len]
+
+	lock_path = os.path.join(SingletonLauncherCfg.lockDir, name + lock_ext)
+
+	try:
+		lock = SLock(lock_path)
+	except IOError:
+		# Can't generate lock file, prompt and quit
+		lg = myLogger(name, None, enable_GUI)
+
+		msg_ = "Internal error: Failed to create lock('%s')"
+		lg.logger.exception(msg_ % lock_path)
+		lg.dialog.popup(i18nData[msg_] % lock_path, 'error')
+
+		sys.exit(2)
+	
+	try:
+		lock.lock()
+	except IOError:
+		# Another instance alreay runnings
+		lg = myLogger(name, None, enable_GUI)
+
+		msg_ = '"%s" is already running'
+		lg.logger.info(msg_ % name)
+		lg.dialog.popup(i18nData[msg_] % name)
+
+		sys.exit(0)
+
+
+	# Lock successfully, single instance running: Now can log to a file(i.e. determine log_path)
+	if log_mode:
+		log_path = os.path.join(SingletonLauncherCfg.logDir, name + '.log')
+		log_level = logging.DEBUG
+	else:
+		log_path = None
+		log_level = logging.INFO
+
+	lg = myLogger(name, log_path, enable_GUI, log_level)
+
+	try:
+		while True:
+			exit_code = 0 # exit code for SingletonLauncher itself
+
+			lg.logger.info('Exec: %s' % str(cmd))
+			ret = do_exec(cmd, lg)
+
+			if ret != 0:
+				user_terminate = False
+
+				if ret < 0:
+					# The child process is quit by SIGTERM or SIGKILL,
+					# which means quit on demand of user(e.g. shutdown, etc)
+					user_terminate_signals = (signal.SIGTERM, signal.SIGKILL)
+				
+					msg_ = '"%s" exited unexpectedly (signal %d)'
+					ret = -ret
+
+					if ret in user_terminate_signals: user_terminate = True
+				
+				else:
+					msg_ = '"%s" exited unexpectedly (exit code %d)'
+
+				if user_terminate:
+					lg.logger.info(msg_ % (name, ret))
+				else:
+					lg.logger.warning(msg_ % (name, ret))
+					if log_mode and not daemon_mode:
+						lg.dialog.popup(i18nData[msg_] % (name, ret), 'warning', True)
+					else:
+						lg.note.popup(i18nData[msg_] % (name, ret), 'warning', log_mode)
+
+					if daemon_mode:
+						time.sleep(2)
+						continue
+
+					exit_code = 4
+
+			break
+
+		sys.exit(exit_code)
+
+	except OSError:
+		msg_ = 'Failed to launch "%s"'
+		lg.logger.exception(msg_ % name)
+		lg.dialog.popup(i18nData[msg_] % name, 'error')
+
+		sys.exit(3)
+

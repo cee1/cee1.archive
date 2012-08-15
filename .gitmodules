@@ -1,0 +1,6 @@
+[submodule "repos/oil"]
+	path = repos/oil
+	url = git://github.com/cee1/oil.git
+[submodule "repos/backupsystem"]
+	path = repos/backupsystem
+	url = git://github.com/cee1/backupsystem.git
