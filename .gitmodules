@@ -4,3 +4,9 @@
 [submodule "repos/backupsystem"]
 	path = repos/backupsystem
 	url = git://github.com/cee1/backupsystem.git
+[submodule "repos/gitosis-hack"]
+	path = repos/gitosis-hack
+	url = git://github.com/cee1/gitosis-hack.git
+[submodule "repos/cgit-hack"]
+	path = repos/cgit-hack
+	url = git://github.com/cee1/cgit-hack.git
