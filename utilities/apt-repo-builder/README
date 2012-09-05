@@ -1,0 +1,11 @@
+apt-repo/
+|
+|-- dists/
+|-- pool/
+|------- incoming/
+|------- fill_section.sh --> scripts/fill_section.sh
+|------- chk_incoming.sh --> scripts/chk_incoming.sh
+|-- scripts <Put all scripts here>
+|-- release.sh 		--> scripts/release.sh
+|-- updateidx.sh 	--> scripts/updateidx.sh
+|-- updateidx-full.sh 	--> scripts/updateidx.sh
