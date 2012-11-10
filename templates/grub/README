@@ -1,0 +1,17 @@
+GRUB2 is complex, the code style of grub2-mkconfig seems horrible, and 
+it can't build a grub.cfg on a Ubuntu and Fedora co-exists system, where
+two kinds of vmlinuz and initrd installed in a seperated boot.
+
+This cleans up grub-mkconfig, and solves my problem.
+Note: it should have some regression as some complex logic removed(e.g. 
+  for encrypted partition), and only works for Ubuntu and Fedora currently.
+
+Usage:
+1. copy to /home/grub
+2. Activate it:
+ * In Ubuntu:
+     mv /usr/sbin/grub-mkconfig /usr/sbin/grub-mkconfig.moved
+     ln -s /home/grub/grub-mkconfig /usr/sbin/grub-mkconfig
+ * In Fedora:
+     mv /usr/sbin/grub2-mkconfig /usr/sbin/grub2-mkconfig.moved
+     ln -s /home/grub/grub-mkconfig /usr/sbin/grub2-mkconfig 

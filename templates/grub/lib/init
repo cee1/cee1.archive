@@ -1,0 +1,44 @@
+#!/bin/sh
+
+self=`basename $0`
+
+export PkgDir=/home/grub
+export PACKAGE_NAME=GRUB
+export PACKAGE_VERSION=2.00~beta6
+export host_os=linux-gnu
+
+get_distro()
+{
+	if grep -q Ubuntu /etc/issue; then
+		echo "Ubuntu"
+	elif grep -q Fedora /etc/issue; then
+		echo "Fedora"
+	else
+		echo "Unknown"
+	fi
+}
+
+export prefix="/usr"
+export exec_prefix="/usr"
+export datarootdir="${prefix}/share"
+export sbindir="/usr/sbin"
+export bindir="/usr/bin"
+
+Distro=`get_distro`
+
+export transform="s&^&&;s,grub,grub2,"
+if [ "x$Distro" = "xUbuntu" ]; then
+	transform="s,x,x,"
+fi
+
+export grub_probe="${sbindir}/`echo grub-probe | sed "${transform}"`"
+export grub_editenv="${bindir}/`echo grub-editenv | sed "${transform}"`"
+export grub_script_check="${bindir}/`echo grub-script-check | sed "${transform}"`"
+export grub_mkrelpath="${bindir}/`echo grub-mkrelpath | sed "${transform}"`"
+export grub_lang=`echo $LANG | cut -d . -f 1`
+
+export TEXTDOMAIN=grub
+export TEXTDOMAINDIR="${datarootdir}/locale"
+
+. "$PkgDir/lib/grub-mkconfig_lib"
+. "$PkgDir/lib/linux-specific"

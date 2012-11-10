@@ -1,0 +1,78 @@
+#! /bin/sh
+
+# grub-mkconfig helper script.
+# Copyright (C) 2006,2007,2008,2009,2010  Free Software Foundation, Inc.
+#
+# GRUB is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# GRUB is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with GRUB.  If not, see <http://www.gnu.org/licenses/>.
+linux_entry ()
+{
+  local CLASS="--class gnu-linux --class gnu --class os"
+  local os="$1"
+  local version="$2"
+  local boot_device="$3"
+  local kernel="$4"
+  local initrd="$5"
+  local type="$6"
+  local args="$7"
+
+  local boot_device_id="$(grub_get_device_id "$boot_device")"
+  
+  local title="$(gettext_printf "%s (%s)" "${os}" "${version}")"
+  if [ x$type = xrecovery ] ; then
+      title="$(gettext_printf "%s (%s, recovery mode)" "${os}" "${version}")"
+  fi
+
+  echo "menuentry '$(echo "$title" | grub_quote)' ${CLASS} \$menuentry_id_option 'gnulinux-$version-$type-$boot_device_id' {"
+
+  # Use ELILO's generic "efifb" when it's known to be available.
+  # FIXME: We need an interface to select vesafb in case efifb can't be used.
+  if [ "x$GRUB_GFXPAYLOAD_LINUX" = x ]; then
+      echo "	load_video" | sed "s/^/$submenu_indentation/"
+      if grep -qx "CONFIG_FB_EFI=y" "${config}" 2> /dev/null \
+	  && grep -qx "CONFIG_VT_HW_CONSOLE_BINDING=y" "${config}" 2> /dev/null; then
+	  echo "	set gfxpayload=keep" | sed "s/^/$submenu_indentation/"
+      fi
+  else
+      if [ "x$GRUB_GFXPAYLOAD_LINUX" != xtext ]; then
+	  echo "	load_video" | sed "s/^/$submenu_indentation/"
+      fi
+      echo "	set gfxpayload=$GRUB_GFXPAYLOAD_LINUX" | sed "s/^/$submenu_indentation/"
+  fi
+
+  echo "	insmod gzio" | sed "s/^/$submenu_indentation/"
+
+  prepare_grub_to_access_device "$GRUB_DEVICE_BOOT"
+
+  local rel_kern_name=`make_system_path_relative_to_its_root "$kernel"`
+  local root_arg=''
+  local insert_root="$(echo $args | grep '\(^\|[ \t]\)root=[^ \t]*\([ \t]\|$\)')"
+
+  if test -z "$initrd" ; then
+    test -z $insert_root && insert_root="root=$boot_device ro" || insert_root=""
+    cat << EOF
+	echo 'Loading Linux $version ...'
+	linux	$rel_kern_name $insert_root $args
+EOF
+  else
+    test -z $insert_root && insert_root="root=UUID=$boot_device_id ro" || insert_root=""
+    cat << EOF
+	echo 'Loading Linux $version ...'
+	linux	$rel_kern_name $insert_root $args
+	echo 'Loading initial ramfs ...'
+	initrd	`make_system_path_relative_to_its_root "$initrd"`
+EOF
+  fi
+
+  echo "}"
+}
