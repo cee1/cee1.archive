@@ -134,7 +134,7 @@ EOF
 EOF
     ;;
     linux)
-      submenu="submenu Advanced options for $LABEL \$menuentry_id_option 'gnulinux-advanced-$(grub_get_device_id $DEVICE)' {"
+      submenu="submenu 'Advanced options for $LABEL' \$menuentry_id_option 'gnulinux-advanced-$(grub_get_device_id $DEVICE)' {"
       versions=''
       initrd_prefix=''
       initrd_ext=''
