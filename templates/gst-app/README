@@ -1,0 +1,13 @@
+An example of gstreamer based application.
+
+Build:
+ * gcc pgmsend.c -o pgmsend `pkg-config --cflags --libs gstreamer-base-0.10`
+
+Debug:
+ * export G_MESSAGES_DEBUG=all
+ * export GST_DEBUG='*5' -- this will generate a mess of log messages
+
+Note:
+ * GstBus will not report StateChange for GST_STATE_NULL
+ * String description of the pipeline not take dynmaic pads appropriately
+ * Set to GST_STATE_PAUSE will trigger pad-added signal
