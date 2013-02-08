@@ -1,0 +1,26 @@
+libhei:
+
+A dummy shows an implementation of packing small(or big) packets to
+a specific size one(e.g. about mtu size), thus improve net transport performance:
+* config.h: related parameters to setup
+* hei-packet.c: hei-packet definition and basic operations
+* common.c: common routines
+* receiver.c: a receiver example, note implement push_buffer function
+    to process received packets
+* sender.c: a sender example, note implement&hooks push_new_data function
+    to push sending data
+
+
+Basic process on receiver side:
+It can do two pass "decoding"(packed packets -> origianl packets):
+1. pass1, do best effort
+2. pass2, again when re-order or some packets are recovered
+
+It has concept of window and sequence number in one window:
+* wid
+* seq
+
+wid1 received, then wid2
+
+Also it introduce a tls based logging facility, which helps of
+saveing couples of "free()" lines.
