@@ -23,7 +23,10 @@ def log_init():
 	log_fmtter = logging.Formatter("%(asctime)s:%(levelname)s:%(message)s")
 
 	# log file handler
+	saved_mask = os.umask(0555)
 	log_handler = logging.handlers.RotatingFileHandler(log_path, maxBytes=log_max_size, backupCount=log_bak_cnt)
+	os.umask(saved_mask)
+
 	log_handler.setLevel(log_level)
 	log_handler.setFormatter(log_fmtter)
 	log.addHandler(log_handler)
@@ -66,10 +69,13 @@ class ILock(object):
 	lock_path =  ''
 	def __init__(self):
 		self.locked = False
+		saved_mask = os.umask(0111)
 		self.fd = os.open(self.lock_path, os.O_CREAT | os.O_RDWR)
+		os.umask(saved_mask)
 
 	def __del__(self):
-		os.close(self.fd)
+		if hasattr(self, 'fd'):
+			os.close(self.fd)
 
 	def exlock(self, block=True):
 		assert self.locked == False, 're-enter the lock'
@@ -286,7 +292,9 @@ def monitor_and_send():
 
 if __name__ == '__main__':
 	if not os.path.exists(WorkingDir):
-		os.mkdir(WorkingDir)
+		saved_mask = os.umask(0)
+		os.mkdir(WorkingDir, 01777)
+		os.umask(saved_mask)
 
 #	f = open('/tmp/a', 'w')
 #	f.write(' '.join(sys.argv) + '\n' + sys.stdin.read())
