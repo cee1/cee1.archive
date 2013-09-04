@@ -51,10 +51,11 @@ def daemonize():
 	if maxfd == resource.RLIM_INFINITY: maxfd = 1024
 	
 	for fd in xrange(0, maxfd):
-		try:
-			os.ttyname(fd)
-		except:
-			continue
+#		try: # detach
+#			os.ttyname(fd)
+#		except:
+#			# for piped in/out/error
+#			if fd <= 2: continue
 
 		try:
 			os.close(fd)
@@ -64,6 +65,11 @@ def daemonize():
 	os.open('/dev/null', os.O_RDWR)
 	os.dup2(0, 1)
 	os.dup2(0, 2)
+#	for fd in (1, 2):
+#		try:
+#			os.read(fd, 0)
+#		except OSError:
+#			os.dup2(0, fd)
 
 class ILock(object):
 	lock_path =  ''
