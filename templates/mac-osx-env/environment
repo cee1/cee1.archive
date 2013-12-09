@@ -1,0 +1,139 @@
+#!/bin/bash
+
+prepend_unique()
+{
+	local pth="$1"
+	local comp="$2"
+
+	local tmp="$(echo "$pth" | sed -n -e "s|$comp:*||" -e "s|^|$comp:|p")"
+
+	echo "${tmp%:}"
+}
+
+scan_for()
+{
+	local envname=
+
+	while [ -n "$1" ]
+	do
+		if [ -z "$envname" ]; then
+			envname="$1"
+		else
+			[ ! -e "$1" ] || eval "$envname"="$(prepend_unique "$(eval echo "\$$envname")" "$1")"
+			# [ -e "$1" ] || echo "$1 Not exists"
+			envname=
+		fi
+		shift
+	done
+}
+
+populate_dirs()
+{
+	local pth=
+	local envs=
+
+	while [ -n "$1" ]
+	do
+		pth="$1"
+		shift
+		if [ -d "$pth" ]; then
+			MY_PATH="$pth"
+	
+			# Follow link and got abspath, simply to filter out duplicated directories"
+			while [ -L "$MY_PATH" ]
+			do
+				MY_PATH="$(readlink "$MY_PATH")"
+			done
+			MY_PATH="$(python -c "import os,os.path; os.chdir('$HOME/$USER-scope'); print os.path.abspath('$MY_PATH')")"
+	
+			# echo "Populate '$pth' => '$MY_PATH'"
+			if [ -f "$pth/environment" ]; then
+				. "$pth/environment"
+			else
+				case "$pth" in
+					*.framework)
+						envs=(PATH			"$MY_PATH/Commands"
+						      # DYLD_LIBRARY_PATH	"$MY_PATH/Libraries"
+						      XDG_DATA_DIRS		"$MY_PATH/Versions/Current/share"
+						      XDG_CONFIG_DIRS		"$MY_PATH/Versions/Current/etc/xdg"
+						      PKG_CONFIG_PATH		"$MY_PATH/Libraries/pkgconfig"
+						      LIBRARY_PATH		"$MY_PATH/Libraries"
+						      ACLOCAL_PATH		"$MY_PATH/Versions/Current/share/aclocal"
+						     )
+						if [ -d "$MY_PATH/Versions/Current/include" ]; then
+							envs+=(CPATH "$MY_PATH/Versions/Current/include")
+						else
+							envs+=(CPATH "$MY_PATH/Headers")
+						fi
+						scan_for "${envs[@]}"
+						;;
+					*)
+						envs=(PATH			"$MY_PATH/bin"
+						      # DYLD_LIBRARY_PATH		"$MY_PATH/lib"
+						      XDG_DATA_DIRS		"$MY_PATH/share"
+						      XDG_CONFIG_DIRS		"$MY_PATH/etc/xdg"
+						      PYTHONPATH		"$MY_PATH/lib/python2.7/site-packages"
+						      GI_TYPELIB_PATH		"$MY_PATH/lib/girepository-1.0"
+						      MANPATH			"$MY_PATH/share/man"
+						      INFOPATH			"$MY_PATH/share/info"
+						      PKG_CONFIG_PATH		"$MY_PATH/lib/pkgconfig"
+						      CPATH			"$MY_PATH/include"
+						      LIBRARY_PATH		"$MY_PATH/lib"
+						      ACLOCAL_PATH		"$MY_PATH/share/aclocal"
+						      GST_PLUGIN_PATH		"$MY_PATH/lib/gstreamer-1.0"
+						     )
+						scan_for "${envs[@]}"
+						;;
+				esac
+			fi
+		fi
+	done
+}
+
+my_priority1=()
+my_priority2=()
+
+for d in "$HOME/$USER-scope/"*
+do
+	case "$d" in
+		environment)
+			;;
+		*.framework)
+			my_priority1+=("$d")
+			;;
+		*)
+			my_priority2+=("$d")
+			;;
+	esac
+done
+
+populate_dirs "${my_priority1[@]}"
+populate_dirs "${my_priority2[@]}"
+
+unset prepend_unique
+unset scan_for
+unset populate_dirs
+unset MY_PATH
+unset my_priority1
+unset my_priority2
+
+export PATH
+export DYLD_LIBRARY_PATH
+export XDG_DATA_DIRS
+export XDG_CONFIG_DIRS
+export PYTHONPATH
+export GI_TYPELIB_PATH
+export MANPATH
+export INFOPATH
+export PKG_CONFIG_PATH
+export CPATH
+export LIBRARY_PATH
+export ACLOCAL_PATH
+export GST_PLUGIN_PATH
+
+# export LC_ALL=en_US.UTF-8
+# export LANG=en_US.UTF-8
+[ -z "$DBUS_LAUNCHD_SESSION_BUS_SOCKET" ] || export DBUS_SESSION_BUS_ADDRESS="unix:path=$DBUS_LAUNCHD_SESSION_BUS_SOCKET"
+
+# echo "$HOME/$USER-scope is populated."
+
