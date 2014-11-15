@@ -7,7 +7,7 @@ if [ ! -f "$1" ]; then
 fi
 
 video_file="$1"
-target="ios-$(basename $video_file)"
+target="ios-$(basename "$video_file")"
 gst_ver=1.0
 
 if [ "$gst_ver" = "0.10" ]; then 
